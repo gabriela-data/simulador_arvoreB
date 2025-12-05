@@ -1,0 +1,653 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Simulador Interativo — Árvore-B (remoção com concat/redistribuição) & B+</title>
+  <style>
+    /* Pixel-art + retro UI */
+    :root{
+      --bg:#0a111e; --panel:#0f1724; --accent:#7cf2a8; --warm:#ffa94d; --danger:#ff6b6b;
+      --muted:#9aa4b2; --card:#12202b; --glass:rgba(255,255,255,0.03);
+      font-family: "Press Start 2P", monospace, system-ui;
+    }
+    @import url('https://fonts.googleapis.com/css2?family=Press+Start+2P&display=swap');
+    html,body{height:100%;margin:0;background:linear-gradient(180deg,var(--bg),#071018);color:#dfe7ee}
+    .app{display:grid;grid-template-columns:360px 1fr;gap:18px;padding:18px}
+    .panel{background:var(--panel);padding:14px;border-radius:12px;box-shadow:0 6px 20px rgba(2,6,12,0.6);}
+
+    h1{font-size:13px;margin:0 0 6px 0;color:var(--accent)}
+    p.small{font-size:10px;margin:6px 0;color:var(--muted)}
+
+    /* controls */
+    .controls{display:flex;gap:8px;flex-wrap:wrap}
+    button{background:var(--card);border:1px solid rgba(255,255,255,0.03);padding:8px 10px;border-radius:8px;font-size:11px;cursor:pointer}
+    button.primary{background:linear-gradient(180deg,var(--accent),#4bd58a);color:#042018;border:none}
+    button.warn{background:linear-gradient(180deg,var(--warm),#ff8f3b);color:#261000;border:none}
+
+    /* canvas area */
+    .stage{display:flex;flex-direction:column;align-items:center;justify-content:flex-start;padding:18px}
+    #vis{width:100%;height:720px;background:linear-gradient(180deg,#041020,#081522);border-radius:12px;border:4px solid rgba(255,255,255,0.03);position:relative;overflow:hidden}
+
+    /* SVG overlay sits over the canvas */
+    #vis svg{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
+
+    /* node style */
+    .node{position:absolute;display:flex;align-items:center;justify-content:center;padding:6px;border-radius:6px;border:3px solid rgba(5,34,34,0.6);box-shadow:0 8px 18px rgba(2,6,12,0.6);transform:translate(-50%,-50%);transition:transform .28s ease, box-shadow .28s ease, border-color .28s ease, background .28s ease}
+    .node .keys{display:flex;gap:6px}
+    .key{background:var(--glass);padding:6px 10px;border-radius:4px;border:2px solid rgba(255,255,255,0.03);min-width:36px;text-align:center;font-weight:700;font-size:11px}
+
+    /* specific event coloring */
+    .node.split { border-color: #ffc857; box-shadow: 0 0 30px 6px rgba(255,200,87,0.08); animation: pulseSplit .9s ease; }
+    .node.merge { border-color: #ff6b6b; box-shadow: 0 0 32px 8px rgba(255,107,107,0.08); animation: pulseMerge .9s ease; }
+    .node.borrow { border-color: #7cf2a8; box-shadow: 0 0 28px 6px rgba(124,242,168,0.08); animation: pulseBorrow .7s ease; }
+    .node.insert { border-color: #7cc8ff; box-shadow: 0 0 24px 6px rgba(124,200,255,0.07); animation: animInsert .6s ease; transform: translate(-50%,-60%); }
+    .node.remove { opacity: .6; transform: scale(.92) translate(-50%,-50%); animation: animRemove .6s ease; }
+
+    /* highlights in timeline also use classes */
+    .highlight-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:6px;vertical-align:middle}
+    .hl-split{background:#ffc857}
+    .hl-merge{background:var(--danger)}
+    .hl-borrow{background:var(--accent)}
+    .hl-insert{background:#7cc8ff}
+    .hl-remove{background:#ff9aa2}
+
+    /* animations */
+    @keyframes animInsert { 0%{transform: translate(-50%,-80%) scale(.6); opacity:0} 70%{transform: translate(-50%,-58%) scale(1.05)} 100%{transform: translate(-50%,-50%) scale(1)} }
+    @keyframes animRemove { 0%{opacity:1; transform:scale(1)} 100%{opacity:0; transform:scale(.6)} }
+    @keyframes pulseSplit { 0%{box-shadow:0 0 0 0 rgba(255,200,87,0.18)} 100%{box-shadow:0 0 36px 8px rgba(255,200,87,0)} }
+    @keyframes pulseMerge { 0%{box-shadow:0 0 0 0 rgba(255,107,107,0.18)} 100%{box-shadow:0 0 44px 10px rgba(255,107,107,0)} }
+    @keyframes pulseBorrow { 0%{box-shadow:0 0 0 0 rgba(124,242,168,0.16)} 100%{box-shadow:0 0 36px 8px rgba(124,242,168,0)} }
+
+    /* timeline */
+    .timeline{margin-top:8px;background:rgba(255,255,255,0.02);padding:8px;border-radius:8px;height:120px;overflow:auto}
+    .step{font-size:11px;padding:6px;border-radius:6px;margin-bottom:6px;background:rgba(255,255,255,0.02);cursor:pointer;display:flex;align-items:center;gap:8px}
+    .step.crit{background:linear-gradient(90deg,rgba(255,107,107,0.08),rgba(255,107,107,0.02));border-left:4px solid var(--danger)}
+    .step.ok{background:linear-gradient(90deg,rgba(124,242,168,0.06),transparent);border-left:4px solid var(--accent)}
+
+    /* small helpers */
+    .row{display:flex;gap:8px}
+    label{font-size:11px;color:var(--muted)}
+    input[type=range]{width:100%}
+
+    /* pixel-ish buttons */
+    .pixel-btn{border-radius:6px;padding:6px 8px;border:2px solid rgba(255,255,255,0.06);font-weight:700}
+
+    footer{font-size:10px;color:var(--muted);margin-top:10px}
+
+    /* responsive */
+    @media (max-width:980px){.app{grid-template-columns:1fr;}}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="panel">
+      <h1>Árvore-B — Simulação Passo-a-Passo</h1>
+      <p class="small">Tema: Remoção com concatenação/redistribuição (t = 2). Mostra o estado inicial, inserções para formar a árvore, e luego remoções quadro-a-quadro. Também inclui slide de visão geral de B+.</p>
+
+      <div style="margin:8px 0" class="controls">
+        <button id="btnPlay" class="primary">▶ Play</button>
+        <button id="btnPrev">⟨ Anterior</button>
+        <button id="btnNext">Próximo ⟩</button>
+        <button id="btnReset" class="warn">Reset</button>
+      </div>
+
+      <div style="margin-top:8px">
+        <label>Velocidade (ms por frame)</label>
+        <input id="speed" type="range" min="200" max="2000" value="900" />
+      </div>
+
+      <div style="margin-top:10px">
+        <label>Dados de entrada (10 elementos não ordenados)</label>
+        <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap">
+          <div class="pixel-btn" id="dataset">[50,20,70,10,30,60,80,25,65,55]</div>
+          <button id="btnShuffle">Embaralhar</button>
+          <button id="btnBuild" class="pixel-btn">Construir Árvore (Inserções)</button>
+        </div>
+      </div>
+
+      <div style="margin-top:10px">
+        <label>Operação:</label>
+        <div class="row" style="margin-top:6px">
+          <select id="operation">
+            <option value="remove_seq">Remover sequência (passo a passo)</option>
+            <option value="single">Remover único (escolher)</option>
+            <option value="bplus">Visão Geral: B+ (slide)</option>
+          </select>
+          <input id="singleKey" type="number" placeholder="Chave" style="width:90px" />
+          <button id="btnStartOp">Iniciar</button>
+        </div>
+      </div>
+
+      <div style="margin-top:10px">
+        <label>Timeline / Passos</label>
+        <div class="timeline" id="timeline"></div>
+      </div>
+
+      <footer>Instruções: pressione Play para rodar quadro-a-quadro. Momentos críticos (redistribuição/concatenação) aparecem em vermelho.</footer>
+    </div>
+
+    <div class="panel stage">
+      <h1>Visor — Estado da Árvore e Frames</h1>
+      <div id="vis"></div>
+      <div style="width:100%;display:flex;gap:8px;margin-top:8px;align-items:center">
+        <div>Frame: <span id="frameIdx">0</span> / <span id="frameCount">0</span></div>
+        <div style="flex:1"></div>
+        <div id="legend" style="font-size:11px;color:var(--muted)">Legenda: <span style="color:var(--accent)">ação</span> • <span style="color:var(--danger)">crítico</span></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  /* ---------- Algoritmo B-Tree (t = 2) - Implementação educativa instrumentada ----------
+     Melhorias implementadas:
+      - SVG com linhas e marcadores (bolinhas nas extremidades)
+      - nodes têm uid para highlights e animações específicas
+      - classes de destaque: split, merge, borrow, insert, remove
+      - animações ativadas por classe CSS durante render do frame
+  */
+
+  // configuração
+  const t = 2; // grau mínimo (t). max keys = 2t-1 = 3
+
+  // helpers uid
+  let _uidCounter = 1;
+  function newUid(){ return 'n'+(_uidCounter++); }
+
+  // estado
+  let dataset = [50,20,70,10,30,60,80,25,65,55];
+  let frames = []; // cada frame: {treeSnapshot, desc, highlights: [{uid, type, text?}]}
+  let currentFrame = 0;
+  let playing = false;
+  let timer = null;
+
+  // DOM
+  const vis = document.getElementById('vis');
+  const timeline = document.getElementById('timeline');
+  const frameIdx = document.getElementById('frameIdx');
+  const frameCount = document.getElementById('frameCount');
+  const speedIn = document.getElementById('speed');
+
+  // Node class
+  function Node(){
+    this.uid = newUid();
+    this.keys = [];
+    this.children = [];
+    this.leaf = true;
+  }
+
+  // snapshot util attaches uid for matching
+  function snap(node){
+    return {
+      uid: node.uid,
+      keys: node.keys.slice(),
+      leaf: node.leaf,
+      children: node.children.map(snap)
+    };
+  }
+
+  // instrumentation: push frame
+  frames.pushFrame = function(tree,desc,highlights=[]){
+    this.push({tree: snap(tree), desc, highlights});
+  }
+
+  // global root
+  let root = new Node();
+
+  // B-Tree insert with split
+  function btreeSplitChild(parent,i){
+    const y = parent.children[i];
+    const z = new Node();
+    z.leaf = y.leaf;
+    // for t=2: y.keys length is 3 (full). we want median at index t-1 = 1
+    // z gets keys after median
+    z.keys = y.keys.splice(t); // splice from index t (2) -> gets keys at index >=2
+    if(!y.leaf){
+      z.children = y.children.splice(t);
+    }
+    parent.children.splice(i+1,0,z);
+    const mid = y.keys.splice(t-1,1)[0]; // remove median from y and return it
+    parent.keys.splice(i,0,mid);
+
+    // push frames describing split: highlight y (left part), z (right part), parent
+    frames.pushFrame(root,`Split child: promovendo ${mid}`,[
+      {uid: y.uid, type:'split'},
+      {uid: z.uid, type:'split'},
+      {uid: parent.uid, type:'crit'}
+    ]);
+  }
+
+  function btreeInsert(rootNode,k){
+    const r = rootNode;
+    if(r.keys.length === 2*t-1){
+      const s = new Node();
+      s.leaf = false;
+      s.children.push(r);
+      root = s;
+      frames.pushFrame(root, 'Root cheio — preparando split do root', [{uid: r.uid, type:'crit'}]);
+      btreeSplitChild(s,0);
+      btreeInsertNonFull(s,k);
+    } else {
+      btreeInsertNonFull(r,k);
+    }
+  }
+
+  function btreeInsertNonFull(x,k){
+    if(x.leaf){
+      // insert key in sorted order
+      let i = x.keys.length-1;
+      while(i>=0 && k < x.keys[i]) i--;
+      x.keys.splice(i+1,0,k);
+      // frame: insertion animation on node x
+      frames.pushFrame(root, `Inserido ${k} em nó folha [${x.keys.join(', ')}]`, [{uid: x.uid, type:'insert'}]);
+    } else {
+      let i = x.keys.length-1;
+      while(i>=0 && k < x.keys[i]) i--;
+      i++;
+      const child = x.children[i];
+      if(child.keys.length === 2*t-1){
+        frames.pushFrame(root, `Filho cheio detectado em posição ${i} — split child`, [{uid: child.uid, type:'crit'}]);
+        btreeSplitChild(x,i);
+        if(k > x.keys[i]) i++;
+      }
+      btreeInsertNonFull(x.children[i],k);
+    }
+  }
+
+  // ---------------- Remoção (educational).
+  function btreeRemove(rootNode,k){
+    frames.pushFrame(root, `Iniciando remoção de ${k}`, [{uid: rootNode.uid, type:'crit'}]);
+    removeKey(rootNode,k);
+    if(rootNode.keys.length===0 && !rootNode.leaf){
+      root = rootNode.children[0];
+      frames.pushFrame(root, `Root ficou vazio — promovendo filho como root`, [{uid: root.uid, type:'merge'}]);
+    }
+  }
+
+  function removeKey(node,k){
+    // find index
+    let idx = node.keys.findIndex(v=>v===k);
+    if(idx !== -1){
+      // key found in this node
+      if(node.leaf){
+        // remove directly
+        node.keys.splice(idx,1);
+        frames.pushFrame(root, `Removido ${k} de nó folha`, [{uid: node.uid, type:'remove'}]);
+      } else {
+        // internal node: use pred or succ or merge
+        const predNode = node.children[idx];
+        if(predNode.keys.length >= t){
+          let pred = getPredecessor(predNode);
+          frames.pushFrame(root, `Substituindo ${k} por predecessor ${pred}`, [{uid: node.uid, type:'ok'}, {uid: predNode.uid, type:'borrow'}]);
+          node.keys[idx] = pred;
+          removeKey(predNode,pred);
+        } else {
+          const succNode = node.children[idx+1];
+          if(succNode.keys.length >= t){
+            let succ = getSuccessor(succNode);
+            frames.pushFrame(root, `Substituindo ${k} por sucessor ${succ}`, [{uid: node.uid, type:'ok'}, {uid: succNode.uid, type:'borrow'}]);
+            node.keys[idx] = succ;
+            removeKey(succNode,succ);
+          } else {
+            // merge children and remove
+            frames.pushFrame(root, `Concatenação (merge) dos filhos em torno de ${k}`, [{uid: node.children[idx].uid, type:'merge'}, {uid: node.uid, type:'merge'}]);
+            mergeChildren(node,idx);
+            removeKey(node.children[idx],k);
+          }
+        }
+      }
+    } else {
+      // key not in this node
+      if(node.leaf){
+        frames.pushFrame(root, `Chave ${k} não encontrada (chegou em folha).`, [{uid: node.uid, type:'ok'}]);
+        return;
+      }
+      // determine child to descend
+      let i = 0; while(i<node.keys.length && k > node.keys[i]) i++;
+      const child = node.children[i];
+      if(child.keys.length < t){
+        const left = i-1>=0?node.children[i-1]:null;
+        const right = i+1 <= node.children.length-1?node.children[i+1]:null;
+        if(left && left.keys.length >= t){
+          frames.pushFrame(root, `Redistribuição: emprestar do irmão esquerdo`, [{uid: left.uid, type:'borrow'}, {uid: child.uid, type:'borrow'}]);
+          borrowFromLeft(node,i);
+        } else if(right && right.keys.length >= t){
+          frames.pushFrame(root, `Redistribuição: emprestar do irmão direito`, [{uid: right.uid, type:'borrow'}, {uid: child.uid, type:'borrow'}]);
+          borrowFromRight(node,i);
+        } else {
+          // merge with a sibling
+          if(left){
+            frames.pushFrame(root, `Concatenação com irmão esquerdo`, [{uid: left.uid, type:'merge'}, {uid: node.uid, type:'merge'}]);
+            mergeChildren(node,i-1);
+            i = i-1;
+          } else {
+            frames.pushFrame(root, `Concatenação com irmão direito`, [{uid: child.uid, type:'merge'}, {uid: node.uid, type:'merge'}]);
+            mergeChildren(node,i);
+          }
+        }
+      }
+      removeKey(node.children[i],k);
+    }
+  }
+
+  function getPredecessor(node){
+    let cur = node; while(!cur.leaf) cur = cur.children[cur.children.length-1];
+    return cur.keys[cur.keys.length-1];
+  }
+  function getSuccessor(node){
+    let cur = node; while(!cur.leaf) cur = cur.children[0];
+    return cur.keys[0];
+  }
+
+  function mergeChildren(parent,idx){
+    const c1 = parent.children[idx];
+    const c2 = parent.children[idx+1];
+    const mid = parent.keys[idx];
+    c1.keys.push(mid, ...c2.keys);
+    if(!c1.leaf){
+      c1.children.push(...c2.children);
+    }
+    parent.keys.splice(idx,1);
+    parent.children.splice(idx+1,1);
+    frames.pushFrame(root, `Depois do merge, nó resultante (${c1.uid}) tem chaves [${c1.keys.join(', ')}]`, [{uid:c1.uid, type:'merge'}]);
+  }
+
+  function borrowFromLeft(parent,idx){
+    const child = parent.children[idx];
+    const left = parent.children[idx-1];
+    const sep = parent.keys[idx-1];
+    parent.keys[idx-1] = left.keys.pop();
+    child.keys.unshift(sep);
+    if(!left.leaf){ child.children.unshift(left.children.pop()); }
+    frames.pushFrame(root, `Após redistribuição (emprestado do esquerdo)`, [{uid:left.uid, type:'borrow'}, {uid:child.uid, type:'borrow'}]);
+  }
+
+  function borrowFromRight(parent,idx){
+    const child = parent.children[idx];
+    const right = parent.children[idx+1];
+    const sep = parent.keys[idx];
+    parent.keys[idx] = right.keys.shift();
+    child.keys.push(sep);
+    if(!right.leaf){ child.children.push(right.children.shift()); }
+    frames.pushFrame(root, `Após redistribuição (emprestado do direito)`, [{uid:right.uid, type:'borrow'}, {uid:child.uid, type:'borrow'}]);
+  }
+
+
+  // ---------------- Visualization utilities ----------------
+
+  function clearVis(){ vis.innerHTML=''; }
+
+  // render tree snapshot (with svg arrows)
+  function renderTree(snapshot){
+    clearVis();
+
+    // create an SVG overlay for edges and markers
+    const svgNS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(svgNS,'svg');
+    svg.setAttribute('width','100%');
+    svg.setAttribute('height','100%');
+    // defs: marker for arrow endpoint -> simple circle marker to create "pontinhos"
+    const defs = document.createElementNS(svgNS,'defs');
+    const marker = document.createElementNS(svgNS,'marker');
+    marker.setAttribute('id','dot');
+    marker.setAttribute('markerWidth','8');
+    marker.setAttribute('markerHeight','8');
+    marker.setAttribute('refX','4');
+    marker.setAttribute('refY','4');
+    marker.setAttribute('orient','auto');
+    const dot = document.createElementNS(svgNS,'circle');
+    dot.setAttribute('cx','4'); dot.setAttribute('cy','4'); dot.setAttribute('r','3'); dot.setAttribute('fill','white'); dot.setAttribute('opacity','.95');
+    marker.appendChild(dot);
+    defs.appendChild(marker);
+
+    // colored marker variants for danger/accent
+    const markerDanger = marker.cloneNode(true);
+    markerDanger.setAttribute('id','dot-danger');
+    markerDanger.querySelector('circle').setAttribute('fill','#ff6b6b');
+    defs.appendChild(markerDanger);
+    const markerAccent = marker.cloneNode(true);
+    markerAccent.setAttribute('id','dot-accent');
+    markerAccent.querySelector('circle').setAttribute('fill','#7cf2a8');
+    defs.appendChild(markerAccent);
+
+    svg.appendChild(defs);
+    vis.appendChild(svg);
+
+    // levels layout (BFS)
+    const levels = [];
+    function traverse(node,depth){
+      if(!levels[depth]) levels[depth]=[];
+      levels[depth].push(node);
+      node._posIndex = levels[depth].length-1;
+      node._depth = depth;
+      node.children.forEach(c=>traverse(c,depth+1));
+    }
+    traverse(snapshot,0);
+
+    const stageW = vis.clientWidth; const stageH = vis.clientHeight;
+    const levelH = stageH / Math.max(1,levels.length);
+
+    // create DOM nodes
+    const nodesByUid = {};
+    levels.forEach((nodes,depth)=>{
+      const gap = stageW / (nodes.length+1);
+      nodes.forEach((node,i)=>{
+        const el = document.createElement('div');
+        el.className='node';
+        el.dataset.uid = node.uid;
+        el.style.left = `${(i+1)*gap}px`;
+        el.style.top = `${(depth+0.5)*levelH}px`;
+        el.innerHTML = `<div class='keys'>${node.keys.map(k=>`<div class='key'>${k}</div>`).join('')}</div>`;
+        vis.appendChild(el);
+        nodesByUid[node.uid] = {node, el, x: (i+1)*gap, y: (depth+0.5)*levelH};
+      });
+    });
+
+    // after nodes are in DOM, draw edges (lines) between parent and children using computed centers
+    // small helper to compute center of each node element
+    function centerOf(el){
+      const rect = el.getBoundingClientRect();
+      const parentRect = vis.getBoundingClientRect();
+      // compute center relative to svg coords (which are same as vis)
+      return {x: (rect.left - parentRect.left) + rect.width/2, y: (rect.top - parentRect.top) + rect.height/2};
+    }
+
+    // draw edges
+    function drawEdges(parentNodeSnapshot){
+      const parentEntry = nodesByUid[parentNodeSnapshot.uid];
+      if(!parentEntry) return;
+      parentNodeSnapshot.children.forEach(childSnap=>{
+        const childEntry = nodesByUid[childSnap.uid];
+        if(!childEntry) return;
+        const p = centerOf(parentEntry.el);
+        const c = centerOf(childEntry.el);
+        // create line (curved polyline for nicer look)
+        const path = document.createElementNS(svgNS,'path');
+        const midY = (p.y + c.y)/2;
+        // simple quadratic curve
+        const d = `M ${p.x} ${p.y} Q ${p.x} ${midY} ${c.x} ${c.y}`;
+        path.setAttribute('d', d);
+        path.setAttribute('fill','none');
+        path.setAttribute('stroke','rgba(255,255,255,0.06)');
+        path.setAttribute('stroke-width','2');
+
+        // choose marker based on highlight types of child or parent (if critical -> danger)
+        const highlights = currentHighlightsMap();
+        const childHl = highlights[childSnap.uid];
+        const parentHl = highlights[parentNodeSnapshot.uid];
+        if((childHl && childHl.includes('merge')) || (parentHl && parentHl.includes('merge'))){
+          path.setAttribute('marker-end','url(#dot-danger)');
+          path.setAttribute('stroke','rgba(255,107,107,0.9)');
+        } else if((childHl && childHl.includes('borrow')) || (parentHl && parentHl.includes('borrow'))){
+          path.setAttribute('marker-end','url(#dot-accent)');
+          path.setAttribute('stroke','rgba(124,242,168,0.9)');
+        } else if((childHl && childHl.includes('split')) || (parentHl && parentHl.includes('split'))){
+          path.setAttribute('marker-end','url(#dot)');
+          path.setAttribute('stroke','rgba(255,200,87,0.95)');
+        } else {
+          path.setAttribute('marker-end','url(#dot)');
+        }
+
+        svg.appendChild(path);
+
+        // recurse children
+        drawEdges(childSnap);
+      });
+    }
+
+    // build highlights map helper
+    function currentHighlightsMap(){
+      const map = {};
+      const frame = frames[currentFrame] || {highlights:[]};
+      if(frame && frame.highlights){
+        frame.highlights.forEach(h=>{ if(!map[h.uid]) map[h.uid]=[]; map[h.uid].push(h.type); });
+      }
+      return map;
+    }
+
+    // draw edges from root snapshot downward
+    drawEdges(snapshot);
+
+    // apply highlights to nodes based on current frame
+    const highlightsMap = currentHighlightsMap();
+    Object.values(nodesByUid).forEach(({node, el})=>{
+      el.classList.remove('split','merge','borrow','insert','remove');
+      const types = highlightsMap[node.uid] || [];
+      // priority: merge > split > borrow > insert > remove
+      if(types.includes('merge')) el.classList.add('merge');
+      else if(types.includes('split')) el.classList.add('split');
+      else if(types.includes('borrow')) el.classList.add('borrow');
+      else if(types.includes('insert')) el.classList.add('insert');
+      else if(types.includes('remove')) el.classList.add('remove');
+    });
+
+    // small accessibility: attach title tooltip text per node showing keys
+    Object.values(nodesByUid).forEach(({node, el})=>{
+      el.title = `uid:${node.uid} — [${node.keys.join(', ')}]`;
+    });
+  }
+
+  // timeline rendering
+  function renderTimeline(){
+    timeline.innerHTML='';
+    frames.forEach((f,i)=>{
+      const d = document.createElement('div');
+      // check if any highlight type is critical (merge/split/borrow flagged as crit earlier)
+      const isCrit = f.highlights && f.highlights.some(h=>['merge','split','crit'].includes(h.type));
+      d.className='step '+(isCrit? 'crit':'ok');
+      // small colored dot on left describing main type
+      const dot = document.createElement('span');
+      dot.className='highlight-dot';
+      // choose color based on first highlight type
+      const mainType = f.highlights && f.highlights[0] ? f.highlights[0].type : 'ok';
+      if(mainType==='split') dot.classList.add('hl-split');
+      else if(mainType==='merge') dot.classList.add('hl-merge');
+      else if(mainType==='borrow') dot.classList.add('hl-borrow');
+      else if(mainType==='insert') dot.classList.add('hl-insert');
+      else if(mainType==='remove') dot.classList.add('hl-remove');
+      else dot.style.background='rgba(255,255,255,0.04)';
+
+      const txt = document.createElement('div');
+      txt.textContent = `${i}: ${f.desc}`;
+      d.appendChild(dot);
+      d.appendChild(txt);
+      d.onclick = ()=>{ pause(); goToFrame(i); };
+      timeline.appendChild(d);
+    });
+    frameCount.textContent = frames.length;
+  }
+
+  function showFrame(i){
+    if(frames.length===0) return;
+    currentFrame = i;
+    const f = frames[i];
+    frameIdx.textContent = i;
+    renderTree(f.tree);
+    // scroll timeline
+    const child = timeline.children[i]; if(child) child.scrollIntoView({block:'nearest'});
+  }
+
+  function goToFrame(i){
+    if(i<0) i=0; if(i>=frames.length) i=frames.length-1;
+    showFrame(i);
+  }
+
+  function play(){
+    if(playing) return; playing=true; document.getElementById('btnPlay').textContent='⏸ Pause';
+    const step = ()=>{
+      if(currentFrame < frames.length-1){
+        goToFrame(currentFrame+1);
+        timer = setTimeout(step, parseInt(speedIn.value));
+      } else { pause(); }
+    }
+    step();
+  }
+  function pause(){playing=false;document.getElementById('btnPlay').textContent='▶ Play';clearTimeout(timer);}
+
+  // -------------- UI bindings ----------------
+  document.getElementById('btnPlay').onclick = ()=>{ if(playing) pause(); else play(); };
+  document.getElementById('btnPrev').onclick = ()=>{ pause(); goToFrame(currentFrame-1); };
+  document.getElementById('btnNext').onclick = ()=>{ pause(); goToFrame(currentFrame+1); };
+  document.getElementById('btnReset').onclick = ()=>{ pause(); init(); };
+  document.getElementById('btnShuffle').onclick = ()=>{ shuffleDataset(); };
+  document.getElementById('btnBuild').onclick = ()=>{ buildTreeFromDataset(); };
+  document.getElementById('btnStartOp').onclick = ()=>{ startOperation(); };
+
+  function shuffleDataset(){
+    dataset = dataset.sort(()=>Math.random()-0.5);
+    document.getElementById('dataset').textContent = '['+dataset.join(',')+']';
+  }
+
+  function buildTreeFromDataset(){
+    // reset frames and root
+    frames.length=0; root = new Node(); frames.pushFrame(root,'Estado Inicial — árvore vazia');
+    for(let v of dataset){ btreeInsert(root,v); }
+    frames.pushFrame(root,'Construção completa — árvore inicial pronta');
+    renderTimeline(); goToFrame(0);
+  }
+
+  function startOperation(){
+    const op = document.getElementById('operation').value;
+    if(op==='bplus'){
+      frames.length=0;
+      frames.pushFrame(root,'B+ Tree — Visão Geral: todas as chaves nas folhas; folhas encadeadas.');
+      frames.pushFrame(root,'Slide: busca em B+ — percorre até folha e lê sequência.');
+      frames.pushFrame(root,'Slide: remoção em B+ — remover da folha, atualizar ponteiros.');
+      renderTimeline(); goToFrame(0);
+      return;
+    }
+
+    if(op==='single'){
+      const k = parseInt(document.getElementById('singleKey').value);
+      if(Number.isNaN(k)){ alert('Escolha uma chave válida'); return; }
+      frames.length=0; frames.pushFrame(root,'Estado inicial antes da remoção');
+      btreeRemove(root,k);
+      frames.pushFrame(root,`Remoção de ${k} concluída`);
+      renderTimeline(); goToFrame(0);
+    }
+
+    if(op==='remove_seq'){
+      frames.length=0; frames.pushFrame(root,'Estado inicial antes da sequência de remoções');
+      const seq = dataset.slice();
+      for(let k of seq){ btreeRemove(root,k); }
+      frames.pushFrame(root,'Sequência de remoções concluída');
+      renderTimeline(); goToFrame(0);
+    }
+  }
+
+  // init with building tree automatically
+  function init(){
+    frames.length=0; root = new Node();
+    document.getElementById('dataset').textContent = '['+dataset.join(',')+']';
+    frames.pushFrame(root,'Estado Inicial — árvore vazia');
+    for(let v of dataset){ btreeInsert(root,v); }
+    frames.pushFrame(root,'Árvore construída');
+    renderTimeline(); goToFrame(0);
+  }
+
+  // start
+  init();
+
+  </script>
+</body>
+</html>
